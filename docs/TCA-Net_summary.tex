@@ -1,0 +1,258 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{Summary of\\ ``TCA-Net: A multi-frequency interactive learning network\\ for automatic modulation recognition''}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent\textbf{Reference:} H. Zeng, W. Quan, Z. Chen, Z. Wu, R. Peng (Southwest Jiaotong University). \emph{Signal Processing} 251 (2027) 110914. Received 25 March 2026, accepted 14 September 2026, online 16 September 2026.
+
+\section{Problem and Motivation}
+
+\begin{itemize}
+  \item \textbf{AMR} (automatic modulation recognition) supports cognitive radio, dynamic spectrum access, spectrum sensing, interference identification, signal surveillance, electronic countermeasures and semantic communication.
+  \item \textbf{Likelihood-based (LB) methods:} Bayes-optimal in theory, but need accurate channel-state information and are computationally costly.
+  \item \textbf{Feature-based (FB) methods:} use handcrafted features such as higher-order cumulants. Efficient, but unstable under severe channel impairments, non-stationary signals and co-channel interference.
+  \item \textbf{Deep learning progression:} CNNs on raw I/Q, CNN-LSTM hybrids, dual-stream I/Q and amplitude-phase designs, then Transformers (complex-valued Transformers, WACN, Swin, pyramid sparse Transformers). Deeper networks cost more, and robustness to adversarial attacks and multi-user interference remains hard.
+  \item \textbf{Time-frequency methods:} HFRNet, APDMs (adversarial purification diffusion), STFT with sliding windows, MAWDN (multilevel adaptive wavelet decomposition), I/Q plus time-frequency fusion, semi-supervised learning.
+  \item \textbf{Gap:} most transform-domain methods treat subbands as independent channels. At low SNR, noise can overwhelm a single band, and without cross-band coordination the network cannot use spectral structure to correct local distortions.
+\end{itemize}
+
+\section{Proposed Solution: TCA-Net}
+
+A \textbf{parallel time-frequency dual-branch network} built around bidirectional interaction between low- and high-frequency wavelet components.
+
+\textbf{Main contributions:}
+\begin{enumerate}
+  \item TCA-Net, integrating cross-band interactive learning, multimodal fusion and multi-scale windowed self-attention. It outperforms the evaluated state-of-the-art baselines on three datasets.
+  \item An \textbf{SNR-aware module} that selects a masking strategy according to the estimated SNR class.
+  \item A \textbf{multi-frequency interactive learning mechanism} with subband reconstruction-consistency supervision.
+\end{enumerate}
+
+\section{Signal Model}
+
+\begin{itemize}
+  \item Received signal:
+  \[ r(t) = [s(t) * h(t)]\, e^{j(2\pi \Delta f\, t + \Delta\phi)} + n(t), \]
+  where $h(t)$ is the multipath channel, $\Delta f$ the carrier-frequency offset, $\Delta\phi$ the phase offset and $n(t)$ is AWGN.
+  \item Transmitted signal (pulse-shaped complex baseband):
+  \[ s(t) = \sum_n A\, a_n\, g(t - nT_{\text{sym}})\, e^{j\phi_n}. \]
+  \item Sampled signal: $r[i] = I[i] + jQ[i]$, $i = 1,\dots,N$.
+  \item SNR: $\text{SNR}_{\text{dB}} = 10\log_{10}(P_{\text{signal}}/P_{\text{noise}})$.
+  \item Time-domain features:
+  \begin{align*}
+    A[i] &= \sqrt{I[i]^2 + Q[i]^2},\\
+    \theta[i] &= \text{unwrap}(\text{atan2}(Q[i], I[i])),\\
+    f_{\text{inst}}[i] &= \frac{\theta[i] - \theta[i-1]}{2\pi \Delta t}.
+  \end{align*}
+  \item Two feature sets: $X_{\text{raw}}$ (I/Q), carrying the primary semantic content, and $X_{\text{af}}$ (normalised amplitude and instantaneous frequency), supplying analytic signal priors for cross-attention. This is deliberately not simple channel concatenation.
+\end{itemize}
+
+\section{Methodology}
+
+\subsection{Frequency-domain branch: multi-frequency interactive learning}
+
+\paragraph{A. SNR-aware stochastic masking.}
+\begin{itemize}
+  \item A lightweight 1D CNN classifies each input as low or high SNR. Architecture: Conv1D (k=3, 32 ch), BN, MaxPool, Conv1D (k=5, 64 ch), BN, MaxPool, Conv1D (k=3, 128 ch), BN, global average pooling, FC (64), FC (2), with GELU activations.
+  \item Labels: low-SNR is $-20$ to $-10$ dB; high-SNR is $-8$ to $18$ dB. The datasets use 2 dB steps, so no sample lies between the two classes.
+  \item Low-SNR prediction: Bernoulli mask with retention probability $1-\rho$, $\rho = 0.3$ (about 30\% of I/Q values set to zero).
+  \item High-SNR prediction: all-ones mask (no masking).
+  \item The mask is \textbf{not} meant to locate noise. It is a stochastic regulariser that reduces dependence on individual I/Q samples.
+  \item Misclassification: a low-SNR sample labelled high-SNR loses the regularisation; a high-SNR sample labelled low-SNR loses some local samples ($\rho = 0.3$ limits this damage).
+  \item Training: the estimator is trained jointly with the backbone for the first 15 epochs, then frozen. The same masking procedure is used at test time.
+  \item SNR-estimator accuracy: 85.4\% (RML2016.10a), 87.8\% (RML2016.10b), 89.1\% (HisarMod2019.1).
+\end{itemize}
+
+\paragraph{B. Wavelet decomposition.}
+\begin{itemize}
+  \item A single-level DWT is applied directly to the masked I/Q sequence (not to a CWT map or learned features). I and Q are processed independently.
+  \item Outputs: $U_L$ (low-frequency) and $U_H$ (high-frequency), each in $\mathbb{R}^{2\times L/2}$.
+  \item The \textbf{db3} wavelet was chosen over Haar, db2 and coif1: largest SNR gain (about 8.63 dB), highest reconstruction correlation (about 0.979) and best feature representation.
+\end{itemize}
+
+\paragraph{C. CMT encoder (cross-band mutual transfer).}
+\begin{itemize}
+  \item Each subband encoder has three residual temporal convolutional blocks, 128 hidden channels, kernel size 3, dilation rates 1, 2, 4.
+  \item Blocks use GLU activations and depthwise separable convolutions:
+  \[ [A,B] = \text{Split}(W_{\text{in}} * X^l), \qquad X^{l+1} = X^l + W_P * \Phi\big(W_d(r_l) * (A \odot \sigma(B))\big). \]
+\end{itemize}
+
+\paragraph{D. CSGM (cross-scale guidance module).}
+\begin{itemize}
+  \item Replaces concatenation with adaptive gating, in both directions (low to high, high to low), with 128 channels each.
+  \item Equations:
+  \begin{align*}
+    \tilde{X}_r &= W_{\text{align}} * X_r,\\
+    G_t &= \sigma\big(W_{\text{gate}} * \text{Concat}(X_t, \tilde{X}_r)\big),\\
+    Y_t &= X_t + G_t \odot \tilde{X}_r.
+  \end{align*}
+  \item After interaction there are two pathways: a \emph{semantic} one (global average pooling for classification) and a \emph{reconstruction} one (mutual-prediction module with one residual TCN block, kernel 3, dropout 0.05) that reconstructs $U_L$ and $U_H$ with an MSE loss, giving subband reconstruction-consistency supervision.
+\end{itemize}
+
+\subsection{Time-domain branch: cross-attention fusion}
+
+\begin{itemize}
+  \item Raw I/Q is the \textbf{query}, normalised instantaneous amplitude is the \textbf{key}, instantaneous frequency is the \textbf{value}.
+  \item Settings: 4 heads, head dimension 256, key/value downsampling factor 2, dropout 0.2.
+  \item Output: a signal-prior-guided temporal representation.
+\end{itemize}
+
+\subsection{MCSA module (multi-scale contextual self-attention)}
+
+\begin{itemize}
+  \item Features from both branches are concatenated channel-wise, passed through BN1d, projected to 32 channels, then through a Bi-LSTM (16 hidden units per direction, dropout 0.1).
+  \item \textbf{TIB block} (time-inverted residual bottleneck): $1\times1$ expansion (ratio 4), depthwise convolution (k=3), $1\times1$ projection, plus a residual connection.
+  \item \textbf{GPA block} (global prototype attention): two stages with window sizes 16 and 4, four heads. A learnable scoring vector $W_P$ gives softmax weights inside each window to build window-level ``prototypes''; queries then attend to these prototypes. Structure: LN + GPA + residual, then LN + MLP + residual.
+\end{itemize}
+
+\subsection{Loss function}
+
+\[ \mathcal{L} = \mathcal{L}_{ce} + \lambda_L \mathcal{L}_L + \lambda_H \mathcal{L}_H, \qquad \lambda_L = \lambda_H = 0.1, \]
+cross-entropy plus the two MSE reconstruction losses.
+
+\section{Experimental Setup}
+
+\subsection{Datasets}
+
+\begin{center}
+\small
+\begin{tabular}{llllp{5cm}}
+\toprule
+Dataset & Samples & Classes & I/Q size & Notes \\
+\midrule
+RML2016.10a & 220,000 & 11 & $2\times128$ & GNU Radio; includes AM-SSB \\
+RML2016.10b & about 1.2 M & 10 & $2\times128$ & No AM-SSB \\
+HisarMod2019.1 & 780,000 & 26 & $2\times1024$ & Ideal, static, Rayleigh, Nakagami-$m$ ($m=2$), Rician ($K=3$) channels \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item All datasets cover $-20$ to $18$ dB in 2 dB steps.
+  \item Splits: 6:2:2 for the RML datasets; HisarMod is printed as ``8:2:5'' in the paper (likely a typo for 8:2:2).
+  \item Augmentation: random phase rotation $z'(t) = z(t)e^{j\Phi}$ with probability 0.9, $\Phi \sim U[-\pi,\pi]$.
+\end{itemize}
+
+\subsection{Hyperparameters and hardware}
+
+\begin{itemize}
+  \item Training batch size 128 / 128 / 64; validation batch size 256 / 256 / 128 (RML10a / RML10b / HisarMod).
+  \item Initial learning rate 0.001, halved if validation loss does not improve for 3 epochs (ReduceLROnPlateau).
+  \item AdamW optimizer, early-stopping patience 15.
+  \item Complexity timing: 50 warm-up and 200 timed iterations, FP32, per-sample amortised.
+  \item Hardware: Windows workstation, NVIDIA GeForce RTX 5070.
+\end{itemize}
+
+\subsection{Metrics and baselines}
+
+\begin{itemize}
+  \item Metrics: peak accuracy, Top-1 and Top-2 accuracy (averaged over SNR ranges), ECE (expected calibration error, 15 bins, lower is better), parameters, FLOPs, latency, peak memory.
+  \item Baselines: MCLDNN, FEA-T, PET-CGDNN, AMC-Net, IQFormer. All used identical splits and dataset-level hyperparameters, but kept their own architectures.
+\end{itemize}
+
+\section{Results}
+
+\subsection{TCA-Net performance}
+
+\begin{center}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Dataset & Peak & Top-1 & Top-2 & $-20$--$0$ dB & $0$--$18$ dB & ECE \\
+\midrule
+RML2016.10a & 93.82\% & 64.31\% & 75.20\% & 40.61\% & 93.33\% & 0.36\% \\
+RML2016.10b & 94.41\% & 65.77\% & 77.09\% & 42.76\% & 93.81\% & 0.83\% \\
+HisarMod2019.1 & 99.99\% & 77.86\% & 86.03\% & 62.97\% & 94.20\% & 6.71\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{TCA-Net complexity}
+
+\begin{center}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Dataset & Params (M) & FLOPs (M) & Latency (ms) & Memory (MiB) \\
+\midrule
+RML2016.10a & 0.75 & 140.89 & 0.0799 & 0.82 \\
+RML2016.10b & 0.75 & 140.89 & 0.0759 & 0.82 \\
+HisarMod2019.1 & 1.28 & 377.43 & 0.1811 & 19.17 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Key findings}
+
+\begin{enumerate}
+  \item \textbf{Best accuracy} on all three datasets. The maximum Top-1 gain over any baseline is 11.81\%.
+  \item \textbf{Low-SNR robustness:} highest low-SNR average accuracy everywhere. Maximum pairwise gains: 4.40\% (10a), 2.64\% (10b), 12.41\% (HisarMod). High-SNR accuracy ranges from 93.33\% to 94.20\%.
+  \item \textbf{Calibration:} lowest ECE on RML2016.10a and 10b. On HisarMod, PET-CGDNN has the lowest ECE (1.18\%), while TCA-Net's 6.71\% is its weakest result.
+  \item \textbf{Complexity trade-off:} on the RML datasets TCA-Net has more parameters, FLOPs and latency than the lightweight baselines (e.g.\ PET-CGDNN: 0.07 M parameters, 16.62 M FLOPs). On HisarMod its cost is intermediate, but it has the highest peak memory. The authors describe an accuracy-efficiency trade-off and say it is theoretically feasible on edge GPU/NPU platforms such as Jetson Orin; pruning, quantization, distillation and operator optimisation could reduce cost.
+  \item \textbf{Accuracy vs.\ SNR:} all methods perform poorly at very low SNR ($-20$ to $-14$ dB); TCA-Net's largest advantage is between $-10$ and $4$ dB.
+\end{enumerate}
+
+\section{Error Analysis}
+
+\begin{itemize}
+  \item Accuracy rises steadily with SNR; above 0 dB most digital modulations are near-perfect.
+  \item \textbf{AM-SSB:} suppressed carrier gives near-zero power during speech silences, so it resembles noise. Noise-dominated samples are therefore misclassified as AM-SSB.
+  \item \textbf{WBFM vs.\ AM-DSB (RML2016.10a):} during speech pauses both look like a near-pure carrier, so they are often confused, even at 6 dB.
+  \item \textbf{HisarMod:} substantial confusion between orders within the PSK, FSK and QAM families, likely because noise hides phase-spacing and amplitude-level differences.
+  \item \textbf{Confusion matrices ($-4$ dB vs.\ 6 dB):} diagonals become dominant as SNR rises.
+  \item \textbf{t-SNE:} at $-20$ dB classes overlap heavily; at $-4$ dB compact clusters appear with some overlap; at 12 dB clusters are well separated.
+\end{itemize}
+
+\section{Ablation Study}
+
+\begin{center}
+\small
+\begin{tabular}{lrr}
+\toprule
+Variant & RML10a Top-1 & RML10b Top-1 \\
+\midrule
+w/o SNR-aware module & 62.65\% & 64.97\% \\
+w/o frequency branch & 63.78\% & 65.16\% \\
+w/o time branch & 63.38\% & 64.28\% \\
+w/o CMT & 62.91\% & 64.27\% \\
+\textbf{Full model} & \textbf{64.31\%} & \textbf{65.77\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item Removing the SNR-aware module lowers average low-SNR accuracy by 2.92\% (10a) and 1.18\% (10b).
+  \item Removing CMT lowers Top-1 by 1.40\% (10a) and 1.50\% (10b), and low-SNR accuracy by 1.40\% and 2.09\%.
+  \item Both branches contribute and are complementary.
+\end{itemize}
+
+\section{Conclusion}
+
+\begin{itemize}
+  \item TCA-Net captures inter-subband dependencies in non-stationary signals through CMT (low/high-frequency exchange), reconstruction regularisation, SNR-aware masking, signal-prior cross-attention and MCSA.
+  \item It shows improved accuracy and low-SNR robustness on all three datasets, under the evaluated conditions.
+  \item Future work: computational optimisation for resource-constrained deployment.
+\end{itemize}
+
+\section{Other Notes}
+
+\begin{itemize}
+  \item \textbf{Funding:} National Natural Science Foundation of China (Grants 52277127 and U2469213) and a Southwest Jiaotong University interdisciplinary research project.
+  \item \textbf{Data availability:} on request only.
+  \item \textbf{Author roles:} Zeng (writing, methodology), Quan (supervision), Chen (visualization), Wu (investigation), Peng (formal analysis).
+  \item \textbf{Caveats:}
+  \begin{itemize}
+    \item Absolute Top-1 numbers are modest (about 64--66\% on RML) because they are averaged over all SNRs, including very noisy ones.
+    \item Gains over the best baselines on RML are small (about 1 point of Top-1 over IQFormer on 10a, roughly 0.3 on 10b).
+    \item ECE on HisarMod is TCA-Net's weakest result.
+  \end{itemize}
+\end{itemize}
+
+\end{document}
